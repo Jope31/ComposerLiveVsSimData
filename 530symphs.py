@@ -14,7 +14,7 @@ SYMPHONIES = {
 }
 
 # Set the desired start date for this group of symphonies in 'YYYY-MM-DD' format.
-START_DATE = "2025-04-15"
+START_DATE = "2025-07-21"
 
 # --- API Endpoints ---
 BACKTEST_API_BASE = "https://backtest-api.composer.trade/api/v2"
@@ -31,7 +31,6 @@ def fetch_backtest_data(api_key, secret_key, symphony_id, start_date):
         "x-api-key-id": api_key,
         "x-origin": "public-api"
     }
-    # Use the simplified payload that is known to work.
     payload = {
         "capital": 10000,
         "start_date": start_date,
@@ -73,64 +72,45 @@ def fetch_live_data(api_key, secret_key, account_id, symphony_id):
 
 def process_and_merge_data(live_data, backtest_data, symphony_id, start_date_filter):
     """
-    Merges live and backtest data, calculates percentage returns, filters by start date,
-    and fills any gaps by carrying forward the last known value.
+    Processes and merges data, only including dates that exist in both datasets.
     """
-    live_pct_by_date = {}
-    backtest_pct_by_date = {}
-    
-    # --- Process Live Data ---
+    # --- Process Live Data into a {date: value} dictionary ---
+    live_performance = {}
     if live_data and 'epoch_ms' in live_data and 'deposit_adjusted_series' in live_data:
         live_points = sorted(zip(live_data['epoch_ms'], live_data['deposit_adjusted_series']))
-        live_baseline = live_points[0][1] if live_points else None
         
-        if live_baseline and live_baseline > 0:
-            for ms_timestamp, value in live_points:
-                date_str = datetime.fromtimestamp(ms_timestamp / 1000).strftime('%Y-%m-%d')
-                live_pct_by_date[date_str] = (value / live_baseline) - 1
+        live_baseline = None
+        for ms_timestamp, value in live_points:
+            date_str = datetime.fromtimestamp(ms_timestamp / 1000).strftime('%Y-%m-%d')
+            if date_str >= start_date_filter:
+                if live_baseline is None:
+                    live_baseline = value
+                if live_baseline > 0:
+                    live_performance[date_str] = (value / live_baseline) - 1
 
-    # --- Process Backtest Data ---
-    if backtest_data and 'dvm_capital' in backtest_data:
-        symphony_key = symphony_id
-        if symphony_id not in backtest_data['dvm_capital']:
-             for key in backtest_data['dvm_capital'].keys():
-                if key != 'SPY':
-                    symphony_key = key
-                    break
-        
-        if symphony_key in backtest_data['dvm_capital']:
-            symphony_timeseries = backtest_data['dvm_capital'][symphony_key]
-            backtest_baseline = 10000
-            for day_key, value in symphony_timeseries.items():
-                date_obj = date(1970, 1, 1) + timedelta(days=int(day_key))
-                date_str = date_obj.isoformat()
-                backtest_pct_by_date[date_str] = (value / backtest_baseline) - 1
+    # --- Process Backtest Data into a {date: value} dictionary ---
+    backtest_performance = {}
+    if backtest_data and 'dvm_capital' in backtest_data and symphony_id in backtest_data['dvm_capital']:
+        symphony_timeseries = backtest_data['dvm_capital'][symphony_id]
+        backtest_baseline = 10000
+        for day_key, value in symphony_timeseries.items():
+            date_obj = date(1970, 1, 1) + timedelta(days=int(day_key))
+            date_str = date_obj.isoformat()
+            if date_str >= start_date_filter:
+                backtest_performance[date_str] = (value / backtest_baseline) - 1
             
-    # --- Combine, Filter, and Fill Data ---
-    all_dates = sorted(list(set(live_pct_by_date.keys()) | set(backtest_pct_by_date.keys())))
+    # --- Find the intersection of dates from both sets ---
+    live_dates = set(live_performance.keys())
+    backtest_dates = set(backtest_performance.keys())
+    common_dates = sorted(list(live_dates.intersection(backtest_dates)))
     
     final_data = []
-    last_known_live = ''
-    last_known_backtest = ''
-
-    for date_str in all_dates:
-        if date_str >= start_date_filter:
-            # Get the value for the current date if it exists
-            live_val = live_pct_by_date.get(date_str)
-            backtest_val = backtest_pct_by_date.get(date_str)
-            
-            # If a value exists, update the last known value
-            if live_val is not None:
-                last_known_live = live_val
-            if backtest_val is not None:
-                last_known_backtest = backtest_val
-            
-            # Append the data for this date, using the last known value if today's is missing
-            final_data.append({
-                "Date": date_str,
-                "Live": last_known_live,
-                "Backtest": last_known_backtest
-            })
+    for date_str in common_dates:
+        final_data.append({
+            "Date": date_str,
+            "Live": live_performance.get(date_str),
+            "Backtest": backtest_performance.get(date_str)
+        })
             
     return final_data
 
@@ -141,8 +121,18 @@ def run_main_logic(secret_key, account_id, api_key):
     for symphony_name, symphony_id in SYMPHONIES.items():
         print(f"\n{'='*20} Processing: {symphony_name} ({symphony_id}) {'='*20}")
         
+        # Determine the symphony's own start date, or use the file's default
+        symphony_start_date = START_DATE 
+        
         live_data = fetch_live_data(api_key, secret_key, account_id, symphony_id)
-        backtest_data = fetch_backtest_data(api_key, secret_key, symphony_id, START_DATE)
+        
+        # Use the first date from live data as the start date for the backtest call
+        # to ensure we get the full relevant range for comparison.
+        if live_data and 'epoch_ms' in live_data and live_data['epoch_ms']:
+            first_live_ms = min(live_data['epoch_ms'])
+            symphony_start_date = datetime.fromtimestamp(first_live_ms / 1000).strftime('%Y-%m-%d')
+
+        backtest_data = fetch_backtest_data(api_key, secret_key, symphony_id, symphony_start_date)
         
         if live_data or backtest_data:
             processed_data = process_and_merge_data(live_data, backtest_data, symphony_id, START_DATE)
