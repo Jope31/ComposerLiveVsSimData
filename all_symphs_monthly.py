@@ -11,7 +11,7 @@ import sys
 SYMPHONIES = {
     "Black Swan Catcher (SPY)": "OLmQh1J0ePZof2F2nEn9",
     "EZ Win": "RFgmUeWk5UgRLVb6s0tQ",
-    }
+}
 
 # --- API Endpoints ---
 BACKTEST_API_BASE = "https://backtest-api.composer.trade/api/v2"
@@ -23,7 +23,6 @@ def fetch_backtest_data(api_key, secret_key, symphony_id, start_date):
     url = f"{BACKTEST_API_BASE}/public/symphonies/{symphony_id}/backtest"
     print(f"Fetching Backtest Data from: {url}")
     
-    # Construct the full, correct headers required by the API.
     headers = {
         "Authorization": f"Bearer {secret_key}",
         "x-api-key-id": api_key,
@@ -49,7 +48,6 @@ def fetch_live_data(api_key, secret_key, account_id, symphony_id):
     url = f"{LIVE_API_BASE}/portfolio/accounts/{account_id}/symphonies/{symphony_id}"
     print(f"Fetching Live Data from: {url}")
     
-    # Construct the full, correct headers required by the API.
     headers = {
         "Authorization": f"Bearer {secret_key}",
         "x-api-key-id": api_key,
@@ -66,32 +64,54 @@ def fetch_live_data(api_key, secret_key, account_id, symphony_id):
 
 def process_and_merge_data(live_data, backtest_data, symphony_id, start_date_filter):
     """
-    Merges live and backtest data, calculates percentage returns, and filters by start date.
+    Processes and merges data, using the logic from the user-provided data_tester.py.
     """
-    merged_data = {}
-    
+    combined_performance = {}
+
+    # 1. Process Live Data
     if live_data and 'epoch_ms' in live_data and 'deposit_adjusted_series' in live_data:
         live_points = sorted(zip(live_data['epoch_ms'], live_data['deposit_adjusted_series']))
         live_baseline = None
-        for ms_timestamp, value in live_points:
-            date_str = datetime.fromtimestamp(ms_timestamp / 1000).strftime('%Y-%m-%d')
+        for ms, value in live_points:
+            # Use utcfromtimestamp to avoid local timezone conversion issues.
+            date_str = datetime.utcfromtimestamp(ms / 1000).strftime('%Y-%m-%d')
             if date_str >= start_date_filter:
                 if live_baseline is None: live_baseline = value
-                if date_str not in merged_data: merged_data[date_str] = {}
-                if live_baseline > 0: merged_data[date_str]['live_pct'] = (value / live_baseline) - 1
+                
+                if date_str not in combined_performance:
+                    combined_performance[date_str] = {"Live": None, "Backtest": None}
+                
+                if live_baseline > 0:
+                    combined_performance[date_str]["Live"] = (value / live_baseline) - 1
 
-    if backtest_data and 'dvm_capital' in backtest_data:
-        if symphony_id in backtest_data['dvm_capital']:
-            symphony_timeseries = backtest_data['dvm_capital'][symphony_id]
-            backtest_baseline = 10000
-            for day_key, value in symphony_timeseries.items():
-                date_obj = date(1970, 1, 1) + timedelta(days=int(day_key))
-                date_str = date_obj.isoformat()
-                if date_str >= start_date_filter:
-                    if date_str not in merged_data: merged_data[date_str] = {}
-                    merged_data[date_str]['backtest_pct'] = (value / backtest_baseline) - 1
+    # 2. Process Backtest Data
+    if backtest_data and 'dvm_capital' in backtest_data and symphony_id in backtest_data['dvm_capital']:
+        timeseries = backtest_data['dvm_capital'][symphony_id]
+        sorted_keys = sorted(timeseries.keys(), key=int)
+        backtest_baseline = None
+        for day_key in sorted_keys:
+            date_obj = datetime(1970, 1, 1) + timedelta(days=int(day_key))
+            date_str = date_obj.strftime('%Y-%m-%d')
             
-    return merged_data
+            if date_str >= start_date_filter:
+                if backtest_baseline is None: backtest_baseline = timeseries[day_key]
+                
+                if date_str not in combined_performance:
+                    combined_performance[date_str] = {"Live": None, "Backtest": None}
+
+                if backtest_baseline > 0:
+                    combined_performance[date_str]["Backtest"] = (timeseries[day_key] / backtest_baseline) - 1
+    
+    # 3. Convert the combined dictionary to a sorted list for final output
+    final_data = []
+    for date_str, values in sorted(combined_performance.items()):
+        final_data.append({
+            "Date": date_str,
+            "Live": values["Live"],
+            "Backtest": values["Backtest"]
+        })
+        
+    return final_data
 
 def run_main_logic(secret_key, account_id, api_key, start_date):
     """Main logic to fetch, process, and print data for the configured symphonies."""
@@ -105,21 +125,19 @@ def run_main_logic(secret_key, account_id, api_key, start_date):
         
         if live_data or backtest_data:
             processed_data = process_and_merge_data(live_data, backtest_data, symphony_id, start_date)
-            for date_str, returns in processed_data.items():
-                all_rows.append({
-                    "Date": date_str, "Symphony": symphony_name,
-                    "Live": returns.get('live_pct', ''), "Backtest": returns.get('backtest_pct', '')
-                })
+            for row_data in processed_data:
+                row_data["Symphony"] = symphony_name
+                all_rows.append(row_data)
         else:
             print(f"--> Could not fetch any data for {symphony_name}. Skipping.")
-        time.sleep(1)
+        time.sleep(1) # Be respectful to the API
 
     if all_rows:
         print("\n\n--- Copy the data below and paste it into Google Sheets ---")
         print("Date,Symphony Name,Live Performance (%),Backtest Performance (%)")
         for row in sorted(all_rows, key=lambda x: (x['Symphony'], x['Date'])):
-            live_str = f"{row['Live']:.4f}" if isinstance(row['Live'], float) else ''
-            backtest_str = f"{row['Backtest']:.4f}" if isinstance(row['Backtest'], float) else ''
+            live_str = f"{row['Live']:.4f}" if row['Live'] is not None else ''
+            backtest_str = f"{row['Backtest']:.4f}" if row['Backtest'] is not None else ''
             print(f"{row['Date']},{row['Symphony']},{live_str},{backtest_str}")
     else:
         print("\nNo data was processed for any symphony.")
