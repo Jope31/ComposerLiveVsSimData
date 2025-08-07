@@ -160,12 +160,12 @@ def main():
         backtest_pnl_series = get_backtest_pnl_series(api_key, secret_key, sym_id, start_date)
         live_value = get_live_pnl(api_key, secret_key, account_id, sym_id)
 
-        if backtest_pnl_series is None or live_value is None or len(backtest_pnl_series) == 0:
-            print(f"Warning: Could not retrieve complete data for '{name}'. Skipping.")
+        if backtest_pnl_series is None or live_value is None or len(backtest_pnl_series) < 2:
+            print(f"Warning: Not enough backtest data points (requires at least 2) for '{name}'. Skipping.")
             continue
 
         mean_pnl = np.mean(backtest_pnl_series)
-        std_dev_pnl = np.std(backtest_pnl_series)
+        std_dev_pnl = np.std(backtest_pnl_series, ddof=1) # Use sample standard deviation
         z_score = calculate_z_score(live_value, mean_pnl, std_dev_pnl)
         
         results.append({
